@@ -1,0 +1,438 @@
+#=============================================================================
+# Copyright 2010-2013 Kitware, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#=============================================================================
+# IIBI Common Dashboard Script
+#
+# This script is shared among most iibi dashboard client machines.
+# It contains basic dashboard driver code common to all clients.
+#
+# Put this script in a directory such as "~/Dashboards/Scripts" or
+# "c:/Dashboards/Scripts".  Create a file next to this script, say
+# 'my_dashboard.cmake', with code of the following form:
+#
+#   # Client maintainer: someone@users.sourceforge.net
+#   set(CTEST_SITE "machine.site")
+#   set(CTEST_BUILD_NAME "Platform-Compiler")
+#   set(CTEST_BUILD_CONFIGURATION Debug)
+#   set(CTEST_CMAKE_GENERATOR "Unix Makefiles")
+#   include(${CTEST_SCRIPT_DIRECTORY}/vxl_common.cmake)
+#
+# Then run a scheduled task (cron job) with a command line such as
+#
+#   ctest -S ~/Dashboards/Scripts/my_dashboard.cmake -V
+#
+# By default the source and build trees will be placed in the path
+# "../MyTests/" relative to your script location.
+#
+# The following variables MUST be set for the script to function properly
+# 
+#   dashboard_project_name          = The name of the project
+#   dashboard_git_url               = the git url of the project
+#   dashboard_project_name          = The name of the project
+#   CTEST_SITE                      = The name of the machine running the tests
+#   CTEST_BUILD_NAME                = The name of the build, typically platform-compiler
+# The following variables may be set before including this script
+# to configure it:
+#
+#   dashboard_project_name          = The name of the project
+#   dashboard_model       = Nightly | Experimental | Continuous
+#   dashboard_root_name   = Change name of "MyTests" directory
+#   dashboard_source_name = Name of source directory (project_name)
+#   dashboard_binary_name = Name of binary directory (project_name-build)
+#   dashboard_cache       = Initial CMakeCache.txt file content
+#   dashboard_do_coverage = True to enable coverage (ex: gcov)
+#   dashboard_do_memcheck = True to enable memcheck (ex: valgrind)
+#   CTEST_GIT_COMMAND     = path to git command-line client
+#   CTEST_BUILD_FLAGS     = build tool arguments (ex: -j2)
+#   CTEST_DASHBOARD_ROOT  = Where to put source and build trees
+#   CTEST_TEST_TIMEOUT    = Per-test timeout length
+#   CTEST_TEST_ARGS       = ctest_test args (ex: PARALLEL_LEVEL 4)
+#   CMAKE_MAKE_PROGRAM    = Path to "make" tool to use
+#
+# Options to configure Git:
+#   dashboard_git_url      = Custom git clone url
+#   dashboard_git_branch   = Custom remote branch to track
+#   dashboard_git_crlf     = Value of core.autocrlf for repository
+#
+# For Makefile generators the script may be executed from an
+# environment already configured to use the desired compilers.
+# Alternatively the environment may be set at the top of the script:
+#
+#   set(ENV{CC}  /path/to/cc)   # C compiler
+#   set(ENV{CXX} /path/to/cxx)  # C++ compiler
+#   set(ENV{LD_LIBRARY_PATH} /path/to/vendor/lib) # (if necessary)
+
+cmake_minimum_required(VERSION 2.8.2 FATAL_ERROR) # 2.8.[01] will NOT work!
+
+# set project name
+if(NOT DEFINED dashboard_project_name)
+  message(WARNING "dashboard_project_name is unset. Setting to UnNamed")
+  set(dashboard_project_name "UnNamed")
+endif()
+if(NOT DEFINED CTEST_PROJECT_NAME)
+  set(CTEST_PROJECT_NAME "${dashboard_project_name}")
+else()
+  if(NOT "${CTEST_PROJECT_NAME}" MATCHES "${dashboard_project_name}")
+    message(WARNING "CTEST_PROJECT_NAME does not match dashboard_project_name")
+  endif()
+endif()
+
+# Select the top dashboard directory.
+if(NOT DEFINED dashboard_root_name)
+  set(dashboard_root_name "MyTests")
+endif()
+if(NOT DEFINED CTEST_DASHBOARD_ROOT)
+  get_filename_component(CTEST_DASHBOARD_ROOT "${CTEST_SCRIPT_DIRECTORY}/../../${dashboard_root_name}" ABSOLUTE)
+endif()
+
+# Select the model (Nightly, Experimental, Continuous).
+if(NOT DEFINED dashboard_model)
+  set(dashboard_model Nightly)
+endif()
+if(NOT "${dashboard_model}" MATCHES "^(Nightly|Experimental|Continuous)$")
+  message(FATAL_ERROR "dashboard_model must be Nightly, Experimental, or Continuous")
+endif()
+
+# Default to a Debug build.
+if(NOT DEFINED CTEST_BUILD_CONFIGURATION)
+  set(CTEST_BUILD_CONFIGURATION Debug)
+endif()
+
+# Choose CTest reporting mode.
+if(NOT "${CTEST_CMAKE_GENERATOR}" MATCHES "Make")
+  # Launchers work only with Makefile generators.
+  set(CTEST_USE_LAUNCHERS 0)
+elseif(NOT DEFINED CTEST_USE_LAUNCHERS)
+  set(CTEST_USE_LAUNCHERS 1)
+endif()
+# HACK dont know what this does
+set(CTEST_USE_LAUNCHERS 0)
+
+# Configure testing.
+if(NOT CTEST_TEST_TIMEOUT)
+  set(CTEST_TEST_TIMEOUT 1500)
+endif()
+
+# Select Git source to use.
+if(NOT DEFINED dashboard_git_url)
+  message(FATAL_ERROR "dashboard_git_url must be set")
+endif()
+if(NOT DEFINED dashboard_git_branch)
+  set(dashboard_git_branch master)
+endif()
+if(NOT DEFINED dashboard_git_crlf)
+  if(UNIX)
+    set(dashboard_git_crlf false)
+  else(UNIX)
+    set(dashboard_git_crlf true)
+  endif(UNIX)
+endif()
+
+# Look for a GIT command-line client.
+if(NOT DEFINED CTEST_GIT_COMMAND)
+  find_program(CTEST_GIT_COMMAND
+    NAMES git git.cmd
+    PATH_SUFFIXES Git/cmd Git/bin
+    )
+endif()
+if(NOT CTEST_GIT_COMMAND)
+  message(FATAL_ERROR "CTEST_GIT_COMMAND not available!")
+endif()
+
+# Check to see if we will be testing multiple git branches, which would require
+# different source trees (if being done simultaiously
+message( "dashboard_multiple_git_branches:${dashboard_multiple_git_branches}")
+if(NOT DEFINED dashboard_multiple_git_branches )
+  set(dashboard_multiple_git_branches 0)
+endif()
+
+# Select a source directory name.
+if(NOT DEFINED CTEST_SOURCE_DIRECTORY)
+  if(NOT DEFINED dashboard_source_name)
+    if(NOT dashboard_multiple_git_branches)
+      set(dashboard_source_name ${dashboard_project_name})
+    else()
+      set(dashboard_source_name ${dashboard_project_name}-${dashboard_git_branch})
+    endif()
+  endif()
+  set(CTEST_SOURCE_DIRECTORY ${CTEST_DASHBOARD_ROOT}/${dashboard_source_name})
+endif()
+
+# Setup coverage
+if(dashboard_do_coverage)
+  # Look for coverage command
+  if(NOT DEFINED CTEST_COVERAGE_COMMAND)
+    find_program(CTEST_COVERAGE_COMMAND NAMES gcov)
+    set(COVERAGE_COMMAND ${CTEST_COVERAGE_COMMAND})
+  endif()
+  if(NOT DEFINED CTEST_COVERAGE_COMMAND)
+    message(FATAL_ERROR "Unable to find coverage command, please set manually or reconfigure to not do coverage")
+  endif()
+
+  # Coverage uses debug compiler flags, so set build to Debug type
+  set(CTEST_BUILD_CONFIGURATION "Debug")
+  set(COVERAGE_FLAGS "-fprofile-arcs -ftest-coverage")
+  set(COMPILER_FLAGS "-g0 -O0")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMPILER_FLAGS} ${COVERAGE_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMPILER_FLAGS} ${COVERAGE_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${COVERAGE_FLAGS}")
+  set(COVERAGE_VARS CMAKE_C_FLAGS CMAKE_CXX_FLAGS CMAKE_EXE_LINKER_FLAGS COVERAGE_COMMAND)
+
+  # Add coverage configuration to dashboard cache
+  if(DEFINED dashboard_cache)
+    set(dashboard_cache "${dashboard_cache}\n")
+  endif()
+  foreach(covVar ${COVERAGE_VARS})
+    #message("covVar:${covVar}")
+    set(dashboard_cache "${dashboard_cache}${covVar}=${${covVar}}\n")
+  endforeach()
+endif()
+
+# Configure memory checking
+if(dashboard_do_memcheck)
+  # Look for memory check command
+  if(NOT DEFINED CTEST_MEMORYCHECK_COMMAND)
+    find_program(CTEST_MEMORYCHECK_COMMAND NAMES valgrind)
+    set(MEMORYCHECK_COMMAND ${CTEST_MEMORYCHECK_COMMAND})
+  endif()
+  if(NOT DEFINED CTEST_MEMORYCHECK_COMMAND)
+    message(FATAL_ERROR "Unable to find memory check command, please set manually or reconfigure to not do memory checking")
+  endif()
+
+  # Memory checking programs uses debug compiler flags, so set build to Debug type
+  set(CTEST_BUILD_CONFIGURATION "Debug")
+
+  # Add memory check suppressions file
+  if(NOT DEFINED CTEST_MEMORYCHECK_SUPPRESSIONS_FILE AND NOT DEFINED MEMORYCHECK_SUPPRESSIONS_FILE)
+    #set(CTEST_MEMORYCHECK_SUPPRESSIONS_FILE "${CTEST_SOURCE_DIRECTORY}/config/valgrind.supp")
+    message( WARNING "No memory check suppressions file")
+  endif()
+  #set(MEMORYCHECK_SUPPRESSIONS_FILE ${CTEST_MEMORYCHECK_SUPPRESSIONS_FILE})
+
+  # Add memory check configuration to dashboard cache
+  if(DEFINED dashboard_cache)
+    set(dashboard_cache "${dashboard_cache}\n")
+  set(dashboard_cache "${dashboard_cache}MEMORYCHECK_COMMAND=${MEMORYCHECK_COMMAND}\n")
+  set(dashboard_cache "${dashboard_cache}MEMORYCHECK_SUPPRESSIONS_FILE=${MEMORYCHECK_SUPPRESSIONS_FILE}\n")
+  endif()
+endif()
+
+# Select a build directory name.
+if(NOT DEFINED CTEST_BINARY_DIRECTORY)
+  if(NOT DEFINED dashboard_binary_name)
+    set( dashboard_binary_name ${CTEST_SOURCE_DIRECTORY}-build-${CTEST_BUILD_CONFIGURATION} )
+  endif()
+  set(CTEST_BINARY_DIRECTORY ${dashboard_binary_name})
+endif()
+
+
+# Delete source tree if it is incompatible with current VCS.
+if(EXISTS ${CTEST_SOURCE_DIRECTORY})
+  if(NOT EXISTS "${CTEST_SOURCE_DIRECTORY}/.git")
+    set(vcs_refresh "because it is not managed by git.")
+  else()
+    execute_process(
+      COMMAND ${CTEST_GIT_COMMAND} reset --hard
+      WORKING_DIRECTORY "${CTEST_SOURCE_DIRECTORY}"
+      OUTPUT_VARIABLE output
+      ERROR_VARIABLE output
+      RESULT_VARIABLE failed
+      )
+    if(failed)
+      set(vcs_refresh "because its .git may be corrupted.")
+    endif()
+  endif()
+  if(vcs_refresh AND "${CTEST_SOURCE_DIRECTORY}" MATCHES "/[Vv][Xx][Ll][^/]*")
+    message("Deleting source tree\n  ${CTEST_SOURCE_DIRECTORY}\n${vcs_refresh}")
+    file(REMOVE_RECURSE "${CTEST_SOURCE_DIRECTORY}")
+  endif()
+endif()
+
+# Support initial checkout if necessary.
+if(NOT EXISTS "${CTEST_SOURCE_DIRECTORY}"
+    AND NOT DEFINED CTEST_CHECKOUT_COMMAND)
+  get_filename_component(_name "${CTEST_SOURCE_DIRECTORY}" NAME)
+
+  # Generate an initial checkout script.
+  set(ctest_checkout_script ${CTEST_DASHBOARD_ROOT}/${_name}-init.cmake)
+  file(WRITE ${ctest_checkout_script} "# git repo init script for ${_name}
+execute_process(
+  COMMAND \"${CTEST_GIT_COMMAND}\" clone -n -b ${dashboard_git_branch}
+          -- \"${dashboard_git_url}\" \"${CTEST_SOURCE_DIRECTORY}\"
+  )
+if(EXISTS \"${CTEST_SOURCE_DIRECTORY}/.git\")
+  execute_process(
+    COMMAND \"${CTEST_GIT_COMMAND}\" config core.autocrlf ${dashboard_git_crlf}
+    WORKING_DIRECTORY \"${CTEST_SOURCE_DIRECTORY}\"
+    )
+  execute_process(
+    COMMAND \"${CTEST_GIT_COMMAND}\" checkout
+    WORKING_DIRECTORY \"${CTEST_SOURCE_DIRECTORY}\"
+    )
+endif()
+")
+  set(CTEST_CHECKOUT_COMMAND "\"${CMAKE_COMMAND}\" -P \"${ctest_checkout_script}\"")
+endif()
+
+#-----------------------------------------------------------------------------
+
+# Send the main script as a note.
+list(APPEND CTEST_NOTES_FILES
+  "${CTEST_SCRIPT_DIRECTORY}/${CTEST_SCRIPT_NAME}"
+  "${CMAKE_CURRENT_LIST_FILE}"
+  )
+
+# Check for required variables.
+foreach(req
+    CTEST_CMAKE_GENERATOR
+#    CTEST_SITE
+#    CTEST_BUILD_NAME
+    )
+  if(NOT DEFINED ${req})
+    message(FATAL_ERROR "The containing script must set ${req}")
+  endif()
+endforeach(req)
+
+# Print summary information.
+set(vars "")
+foreach(v
+    CTEST_SITE
+    CTEST_BUILD_NAME
+    CTEST_SOURCE_DIRECTORY
+    CTEST_BINARY_DIRECTORY
+    CTEST_CMAKE_GENERATOR
+    CTEST_BUILD_CONFIGURATION
+    CTEST_GIT_COMMAND
+    CTEST_CHECKOUT_COMMAND
+    CTEST_CONFIGURE_COMMAND
+    CTEST_SCRIPT_DIRECTORY
+    CTEST_USE_LAUNCHERS
+    CTEST_COVERAGE_COMMAND
+    CTEST_MEMORYCHECK_COMMAND
+    CTEST_MEMORYCHECK_SUPPRESSIONS_FILE
+    )
+  set(vars "${vars}  ${v}=[${${v}}]\n")
+endforeach(v)
+
+# Print dashboard_cache variables
+if(DEFINED dashboard_cache)
+  message("\ndashboard_cache initilazation:\n${dashboard_cache}\n")
+endif()
+message("Dashboard script configuration:\n${vars}\n")
+
+# Avoid non-ascii characters in tool output.
+set(ENV{LC_ALL} C)
+
+# Helper macro to write the initial cache.
+macro(write_cache)
+  set(cache_build_type "")
+  set(cache_make_program "")
+  if(CTEST_CMAKE_GENERATOR MATCHES "Make")
+    set(cache_build_type CMAKE_BUILD_TYPE:STRING=${CTEST_BUILD_CONFIGURATION})
+    if(CMAKE_MAKE_PROGRAM)
+      set(cache_make_program CMAKE_MAKE_PROGRAM:FILEPATH=${CMAKE_MAKE_PROGRAM})
+    endif()
+  endif()
+  file(WRITE ${CTEST_BINARY_DIRECTORY}/CMakeCache.txt "
+SITE:STRING=${CTEST_SITE}
+BUILDNAME:STRING=${CTEST_BUILD_NAME}
+CTEST_USE_LAUNCHERS:BOOL=${CTEST_USE_LAUNCHERS}
+DART_TESTING_TIMEOUT:STRING=${CTEST_TEST_TIMEOUT}
+GIT_EXECUTABLE:FILEPATH=${CTEST_GIT_COMMAND}
+${cache_build_type}
+${cache_make_program}
+${dashboard_cache}
+")
+endmacro(write_cache)
+
+# Start with a fresh build tree.
+file(MAKE_DIRECTORY "${CTEST_BINARY_DIRECTORY}")
+if(NOT "${CTEST_SOURCE_DIRECTORY}" STREQUAL "${CTEST_BINARY_DIRECTORY}")
+  message("Clearing build tree...")
+  ctest_empty_binary_directory(${CTEST_BINARY_DIRECTORY})
+endif()
+
+set(dashboard_continuous 0)
+if("${dashboard_model}" STREQUAL "Continuous")
+  set(dashboard_continuous 1)
+endif()
+
+if(COMMAND dashboard_hook_init)
+  dashboard_hook_init()
+endif()
+
+set(dashboard_done 0)
+while(NOT dashboard_done)
+  if(dashboard_continuous)
+    set(START_TIME ${CTEST_ELAPSED_TIME})
+  endif()
+
+  # Start a new submission.
+  if(COMMAND dashboard_hook_start)
+    dashboard_hook_start()
+  endif()
+  ctest_start(${dashboard_model})
+  set(CTEST_CHECKOUT_COMMAND) # checkout on first iteration only
+
+  # Always build if the tree is fresh.
+  set(dashboard_fresh 0)
+  if(NOT EXISTS "${CTEST_BINARY_DIRECTORY}/CMakeCache.txt")
+    set(dashboard_fresh 1)
+    message("Starting fresh build...")
+    write_cache()
+  endif()
+
+  # Look for updates.
+  ctest_update(RETURN_VALUE count)
+  message("Found ${count} changed files")
+  if(dashboard_fresh OR NOT dashboard_continuous OR count GREATER 0)
+    ctest_configure()
+    ctest_read_custom_files(${CTEST_BINARY_DIRECTORY})
+
+    if(COMMAND dashboard_hook_build)
+      dashboard_hook_build()
+    endif()
+    ctest_build()
+
+    if(COMMAND dashboard_hook_test)
+      dashboard_hook_test()
+    endif()
+    ctest_test(${CTEST_TEST_ARGS})
+
+    if(dashboard_do_coverage)
+      ctest_coverage()
+    endif()
+    if(dashboard_do_memcheck)
+      ctest_memcheck()
+    endif()
+    if(NOT dashboard_no_submit)
+      ctest_submit()
+    endif()
+    if(COMMAND dashboard_hook_end)
+      dashboard_hook_end()
+    endif()
+  endif()
+
+  if(dashboard_continuous)
+    # Delay until at least 5 minutes past START_TIME
+    ctest_sleep(${START_TIME} 300 ${CTEST_ELAPSED_TIME})
+    if(${CTEST_ELAPSED_TIME} GREATER 43200)
+      set(dashboard_done 1)
+    endif()
+  else()
+    # Not continuous, so we are done.
+    set(dashboard_done 1)
+  endif()
+endwhile()
